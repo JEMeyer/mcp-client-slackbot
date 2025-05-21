@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 from contextlib import AsyncExitStack
 from typing import Any, Dict, List
@@ -28,9 +29,8 @@ class Configuration:
         self.load_env()
         self.slack_bot_token = os.getenv("SLACK_BOT_TOKEN")
         self.slack_app_token = os.getenv("SLACK_APP_TOKEN")
+        self.openai_base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
-        self.groq_api_key = os.getenv("GROQ_API_KEY")
-        self.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
         self.llm_model = os.getenv("LLM_MODEL", "gpt-4-turbo")
 
     @staticmethod
@@ -52,36 +52,24 @@ class Configuration:
             FileNotFoundError: If configuration file doesn't exist.
             JSONDecodeError: If configuration file is invalid JSON.
         """
+        # Read the raw file content
         with open(file_path, "r") as f:
-            return json.load(f)
+            content = f.read()
 
-    @property
-    def llm_api_key(self) -> str:
-        """Get the appropriate LLM API key based on the model.
+        # Find all placeholders like ${VAR_NAME}
+        placeholder_pattern = r"\$\{(\w+)\}"
 
-        Returns:
-            The API key as a string.
 
-        Raises:
-            ValueError: If no API key is found for the selected model.
-        """
-        if "gpt" in self.llm_model.lower() and self.openai_api_key:
-            return self.openai_api_key
-        elif "llama" in self.llm_model.lower() and self.groq_api_key:
-            return self.groq_api_key
-        elif "claude" in self.llm_model.lower() and self.anthropic_api_key:
-            return self.anthropic_api_key
+        for match in re.finditer(placeholder_pattern, content):
+            var_name = match.group(1)
+            env_value = os.getenv(var_name)
+            if env_value is None:
+                raise RuntimeError(f"Environment variable '{var_name}' not set")
+            # Replace all occurrences of this placeholder
+            content = content.replace(match.group(0), env_value)
 
-        # Fallback to any available key
-        if self.openai_api_key:
-            return self.openai_api_key
-        elif self.groq_api_key:
-            return self.groq_api_key
-        elif self.anthropic_api_key:
-            return self.anthropic_api_key
-
-        raise ValueError("No API key found for any LLM provider")
-
+        # Parse JSON
+        return json.loads(content)
 
 class Server:
     """Manages MCP server connections and tool execution."""
@@ -201,7 +189,6 @@ class Server:
             except Exception as e:
                 logging.error(f"Error during cleanup of server {self.name}: {e}")
 
-
 class Tool:
     """Represents a tool with its properties and formatting."""
 
@@ -235,43 +222,26 @@ Arguments:
 {chr(10).join(args_desc)}
 """
 
-
 class LLMClient:
     """Client for communicating with LLM APIs."""
 
-    def __init__(self, api_key: str, model: str) -> None:
+    def __init__(self, api_key: str, model: str, base_url: str) -> None:
         """Initialize the LLM client.
 
         Args:
             api_key: API key for the LLM provider
             model: Model identifier to use
+            base_url: Base URL for the LLM provider's API
         """
+        self.base_url = base_url
         self.api_key = api_key
         self.model = model
         self.timeout = 30.0  # 30 second timeout
         self.max_retries = 2
 
-    async def get_response(self, messages: List[Dict[str, str]]) -> str:
-        """Get a response from the LLM.
-
-        Args:
-            messages: List of conversation messages
-
-        Returns:
-            Text response from the LLM
-        """
-        if self.model.startswith("gpt-") or self.model.startswith("ft:gpt-"):
-            return await self._get_openai_response(messages)
-        elif self.model.startswith("llama-"):
-            return await self._get_groq_response(messages)
-        elif self.model.startswith("claude-"):
-            return await self._get_anthropic_response(messages)
-        else:
-            raise ValueError(f"Unsupported model: {self.model}")
-
     async def _get_openai_response(self, messages: List[Dict[str, str]]) -> str:
         """Get a response from the OpenAI API."""
-        url = "https://api.openai.com/v1/chat/completions"
+        url = f"{self.base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -281,7 +251,6 @@ class LLMClient:
             "model": self.model,
             "messages": messages,
             "temperature": 0.7,
-            "max_tokens": 1500,
         }
 
         for attempt in range(self.max_retries + 1):
@@ -303,95 +272,7 @@ class LLMClient:
                 if attempt == self.max_retries:
                     return f"Failed to get response: {str(e)}"
                 await asyncio.sleep(2**attempt)  # Exponential backoff
-
-    async def _get_groq_response(self, messages: List[Dict[str, str]]) -> str:
-        """Get a response from the Groq API."""
-        url = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": 0.7,
-            "max_tokens": 1500,
-        }
-
-        for attempt in range(self.max_retries + 1):
-            try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    response = await client.post(url, json=payload, headers=headers)
-
-                    if response.status_code == 200:
-                        response_data = response.json()
-                        return response_data["choices"][0]["message"]["content"]
-                    else:
-                        if attempt == self.max_retries:
-                            return (
-                                f"Error from API: {response.status_code} - "
-                                f"{response.text}"
-                            )
-                        await asyncio.sleep(2**attempt)  # Exponential backoff
-            except Exception as e:
-                if attempt == self.max_retries:
-                    return f"Failed to get response: {str(e)}"
-                await asyncio.sleep(2**attempt)  # Exponential backoff
-
-    async def _get_anthropic_response(self, messages: List[Dict[str, str]]) -> str:
-        """Get a response from the Anthropic API."""
-        url = "https://api.anthropic.com/v1/messages"
-        headers = {
-            "anthropic-version": "2023-06-01",
-            "x-api-key": self.api_key,
-            "Content-Type": "application/json",
-        }
-
-        # Convert messages to Anthropic format
-        system_message = None
-        anthropic_messages = []
-
-        for msg in messages:
-            if msg["role"] == "system":
-                system_message = msg["content"]
-            elif msg["role"] == "user":
-                anthropic_messages.append({"role": "user", "content": msg["content"]})
-            elif msg["role"] == "assistant":
-                anthropic_messages.append(
-                    {"role": "assistant", "content": msg["content"]}
-                )
-
-        payload = {
-            "model": self.model,
-            "messages": anthropic_messages,
-            "temperature": 0.7,
-            "max_tokens": 1500,
-        }
-
-        if system_message:
-            payload["system"] = system_message
-
-        for attempt in range(self.max_retries + 1):
-            try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    response = await client.post(url, json=payload, headers=headers)
-
-                    if response.status_code == 200:
-                        response_data = response.json()
-                        return response_data["content"][0]["text"]
-                    else:
-                        if attempt == self.max_retries:
-                            return (
-                                f"Error from API: {response.status_code} - "
-                                f"{response.text}"
-                            )
-                        await asyncio.sleep(2**attempt)  # Exponential backoff
-            except Exception as e:
-                if attempt == self.max_retries:
-                    return f"Failed to get response: {str(e)}"
-                await asyncio.sleep(2**attempt)  # Exponential backoff
-
+        return ""
 
 class SlackMCPBot:
     """Manages the Slack bot integration with MCP servers."""
@@ -509,6 +390,15 @@ class SlackMCPBot:
         except Exception as e:
             logging.error(f"Error publishing home view: {e}")
 
+    def add_response_to_conversation(self, channel: str, response: str) -> dict:
+        if channel not in self.conversations:
+            self.conversations[channel] = []
+
+        # Append the response as a message dict and return
+        responseDict = {"role": "assistant", "content": response}
+        self.conversations[channel]["messages"].append(responseDict)
+        return responseDict
+
     async def _process_message(self, event, say):
         """Process incoming messages and generate responses."""
         channel = event["channel"]
@@ -546,7 +436,8 @@ When you need to use a tool, you MUST format your response exactly like this:
 Make sure to include both the tool name AND the JSON arguments.
 Never leave out the JSON arguments.
 
-After receiving tool results, interpret them for the user in a helpful way.
+After receiving tool results, interpret them for the user in a helpful way, which may include additional tool calls if necessary.
+You can continue to use tools as many times as needed to fulfill the request, without asking for permission to continue. You are in a loop that will stop after 10 tool calls maximum.
 """
                 ),
             }
@@ -563,17 +454,18 @@ After receiving tool results, interpret them for the user in a helpful way.
             if "messages" in self.conversations[channel]:
                 messages.extend(self.conversations[channel]["messages"][-5:])
 
-            # Get LLM response
-            response = await self.llm_client.get_response(messages)
+            response = await self.llm_client._get_openai_response(messages)
+            messages += self.add_response_to_conversation(channel, response)
 
-            # Process tool calls in the response
-            if "[TOOL]" in response:
+            tool_call_count = 0
+            while "[TOOL]" in response and tool_call_count < 10:
+                tool_call_count += 1
                 response = await self._process_tool_call(response, channel)
-
-            # Add assistant response to conversation history
-            self.conversations[channel]["messages"].append(
-                {"role": "assistant", "content": response}
-            )
+                # After tool call, we need to consult the LLM again.
+                messages += self.add_response_to_conversation(channel, response)
+                # Get LLM response with tool result in history
+                response = await self.llm_client._get_openai_response(messages)
+                messages += self.add_response_to_conversation(channel, response)
 
             # Send the response to the user
             await say(text=response, channel=channel, thread_ts=thread_ts)
@@ -616,22 +508,16 @@ After receiving tool results, interpret them for the user in a helpful way.
                     # Execute the tool
                     tool_result = await server.execute_tool(tool_name, arguments)
 
-                    # Add tool result to conversation history
-                    tool_result_msg = f"Tool result for {tool_name}:\n{tool_result}"
-                    self.conversations[channel]["messages"].append(
-                        {"role": "system", "content": tool_result_msg}
-                    )
-
                     try:
                         # Get interpretation from LLM
                         messages = [
                             {
                                 "role": "system",
                                 "content": (
-                                    "You are a helpful assistant. You've just "
-                                    "used a tool and received results. Interpret "
-                                    "these results for the user in a clear, "
-                                    "helpful way."
+                                    "You are a helpful record keeper. When you receive "
+                                   " a result from a tool as reported by the user, "
+                                    "interpret these results in a clear, helpful way, "
+                                    "which may mean no modification to the result."
                                 ),
                             },
                             {
@@ -645,7 +531,7 @@ After receiving tool results, interpret them for the user in a helpful way.
                             },
                         ]
 
-                        interpretation = await self.llm_client.get_response(messages)
+                        interpretation = await self.llm_client._get_openai_response(messages)
                         return interpretation
                     except Exception as e:
                         logging.error(
@@ -706,9 +592,9 @@ async def main() -> None:
     """Initialize and run the Slack bot."""
     config = Configuration()
 
-    if not config.slack_bot_token or not config.slack_app_token:
+    if not config.slack_bot_token or not config.slack_app_token or not config.openai_api_key:
         raise ValueError(
-            "SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in environment variables"
+            "SLACK_BOT_TOKEN, SLACK_APP_TOKEN, and OPENAI_API_KEY must be set in environment variables"
         )
 
     server_config = config.load_config("servers_config.json")
@@ -717,7 +603,7 @@ async def main() -> None:
         for name, srv_config in server_config["mcpServers"].items()
     ]
 
-    llm_client = LLMClient(config.llm_api_key, config.llm_model)
+    llm_client = LLMClient(config.openai_api_key, config.llm_model, config.openai_base_url)
 
     slack_bot = SlackMCPBot(
         config.slack_bot_token, config.slack_app_token, servers, llm_client
