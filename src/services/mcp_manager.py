@@ -214,6 +214,12 @@ class MCPManager:
     def list_tools(self) -> List[ToolInfo]:
         return list(self.tools.values())
 
+    def format_tools_for_llm(self) -> str:
+        tools = sorted(self.tools.values(), key=lambda t: t.name.lower())
+        if not tools:
+            return "No external tools are configured."
+        return "\n\n".join(tool.format_for_llm() for tool in tools)
+
     def _load_server_configs(self) -> Dict[str, MCPServerConfig]:
         if not self.config_path.exists():
             logging.warning("MCP server config '%s' not found", self.config_path)

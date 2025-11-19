@@ -40,6 +40,7 @@ def normalize_output(raw: str) -> Dict[str, Any]:
     tool_call = extract_tool_json(answer)
 
     return {
+        "raw": raw,
         "reasoning": reasoning,
         "final": answer if tool_call is None else "",
         "tool": tool_call,
