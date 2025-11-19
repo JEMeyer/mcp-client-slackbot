@@ -1,0 +1,11 @@
+aiohttp>=3.13.2
+asyncio>=4.0.0
+openai>=2.8.1
+slack_sdk>=3.38.0
+pydantic>=2.0
+requests=2.32.5
+
+# Development dependencies
+pyright>=1.1.379
+pytest>=8.3.3
+ruff>=0.6.9

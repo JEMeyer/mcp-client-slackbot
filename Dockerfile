@@ -1,28 +1,25 @@
-FROM python:3.11-slim
+FROM python:3.11-slim AS base
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    curl \
-    nodejs \
-    npm \
-    && rm -rf /var/lib/apt/lists/*
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
 
-# Install uvx for MCP server management
-RUN pip install uv
-
-# Set working directory
 WORKDIR /app
 
-# Copy the application code and metadata required for installation
-COPY pyproject.toml ./
-COPY README.md ./
-COPY mcp_simple_slackbot/ ./mcp_simple_slackbot/
+# Install system deps
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-RUN pip install -e .
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Set the working directory to the app module
-WORKDIR /app/mcp_simple_slackbot
+COPY src ./src
+COPY main.py .
 
-# Run the bot
+EXPOSE 8080
+
+# HEALTHCHECK (container level)
+HEALTHCHECK --interval=20s --timeout=3s --retries=3 CMD curl -f http://localhost:8080/healthz || exit 1
+
 CMD ["python", "main.py"]
